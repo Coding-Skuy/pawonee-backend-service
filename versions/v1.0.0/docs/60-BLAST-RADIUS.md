@@ -1,43 +1,43 @@
 > Versi: v1.0.0 | Status: disetujui | Menggantikan: -
 
-# 60-BLAST-RADIUS — Radius Dampak (pawonee-backend-service)
+# 60-BLAST-RADIUS — Batas Context (pawonee-backend-service)
 
-Mengacu: Pawonee-TownHall v1.0.0 (https://github.com/Coding-Skuy/Pawonee-TownHall).
+Mengacu: Pawonee-TownHall `platform/versions/v1.0.0` (https://github.com/Coding-Skuy/Pawonee-TownHall/tree/main/platform/versions/v1.0.0), beku 2026-10-07. Baris Pawonee townhall-roadmap §2: point of concern "12 resep inti; serapan ≥1.500 g"; batas context "G2-V/U/S; porsi 1–8 jiwa; DB `pawonee`; JWT audiens `pawonee`". Rujukan lintas divisi: KONTEKS §8/§9.
 
-## 1. Cakupan repo
+## 1. Boleh disentuh repo ini
 
-- Repo `pawonee-backend-service`: backend Rust yang menyajikan API resep dan preferensi di atas database `pawonee`. Menjadi jembatan antara bank resep, aplikasi KMP, web, dan pipa data.
-- Kontrak: `GET /kesehatan`, `GET /v1/resep/rekomendasi?bahan=...`, `GET /v1/preferensi/{id}`, `PUT /v1/preferensi/{id}`; migrasi `migrations/001_init.sql` (tabel `resep`, `preferensi`); JWT audiens `pawonee`.
+- Seluruh kode `src/`, `migrations/`, dan `docs/api/` repo ini.
+- DB logis `pawonee` (tabel `resep`, `profil_keluarga`, `riwayat_masak`, `sinyal_pedaree`).
+- Membaca stok Pedaree lewat API/proksi Pedaree (bukan DB-nya).
 
-## 2. Dampak ke hulu
+## 2. Dilarang
 
-- `:shared:pantry-resep` (milik Pawonee): perubahan model di repo ini wajib dipantulkan ke modul tersebut dan `models/schema.json`, bila tidak KMP, web, backend, dan pipa akan gagal validasi.
-- `pawonee-ai-models`: perubahan aturan grade-2 atau skema memaksa evaluasi ulang 12/12 dan migrasi data.
-- Database `pawonee`: perubahan kolom atau tabel butuh migrasi baru dan uji balik.
+- Query langsung ke DB Pedaree, Lumbung, atau divisi lain.
+- Mengubah bentuk `Rekomendasi`/`Resep` tanpa memperbarui `:shared:pantry-resep` dan `models/schema.json`.
+- Menghitung ulang rumus skor berbeda dari `:shared:pantry-resep`.
+- Menyentuh DB divisi lain (DB per service; Titeny hanya read-only ke DB sumber).
+- Memakai komoditas non-pilot (kentang/wortel/tomat/kol) untuk klaim pasokan agregasi Lumbung; hanya cabai, bawang, kangkung (KONTEKS §4).
+- Menambah resep ke-13, mengubah definisi G2, atau mengubah audiens JWT tanpa PR TownHall + ADR.
 
-## 3. Dampak ke hilir (Pedaree)
+## 3. Kontrak yang diproduksi
 
-- Pedaree mengonsumsi resep, preferensi, dan topik `sinyal.pedaree.v1` dari Pawonee; perubahan kontrak tanpa pemberitahuan merusak rekomendasi pendamping Pedaree.
-- Perubahan jadwal pipa (tiap 15 menit) berpengaruh pada kesegaran sinyal Pedaree.
-- Perubahan kartu resep atau desain berpengaruh pada tampilan ringkasan Pedaree.
+- API v1 `https://api.pawonee.chefgenie.id/v1` (header `X-Kontrak-Versi: v1`) dan OpenAPI 3.1 `docs/api/openapi.yaml`.
+- Penerbitan JWT audiens `pawonee` + refresh; verifikasi API key perangkat.
+- Tabel `sinyal_pedaree` sebagai sumber topik `sinyal.pedaree.v1` (dibaca pipa dan Pedaree).
 
-## 4. Dampak ke dalam divisi
+## 4. Kontrak yang dikonsumsi
 
-- KMP lawan web lawan backend lawan pipa lawan desain lawan infra saling terikat pada skema yang sama; satu perubahan skema tanpa sinkronisasi memecahkan 6 repo sekaligus.
-- JWT audiens `pawonee`: perubahan audiens memutus autentikasi semua klien dan backend.
-- Migrasi web ke SvelteKit dan Bun (rencana, khusus `pawonee-web`) berdampak pada `pawonee-design` (referensi komponen) dan CI infra; karena itu migrasi dijadwalkan saat fase coding dengan kontrak dibekukan.
+- Bank resep dan `models/schema.json` dari `pawonee-ai-models` (disinkron lewat migrasi).
+- Stok Pedaree inventori (baca) dan harga Lumbung G2 per 100 g (wortel 1.200, kentang 1.500, tomat 1.800, kangkung 1.000, cabai 4.000).
+- Rahasia (`DATABASE_URL`, kunci JWT, service/device API keys) dari `pawonee-infra-devops`.
 
-## 5. Mitigasi
+## 5. Dampak bila berubah
 
-1. Bekukan kontrak selama migrasi atau perubahan skema.
-2. Uji kontrak (`GET /v1/resep/rekomendasi`, preferensi, evaluasi 12/12, bangun sinyal) sebelum gabung.
-3. Beri tahu Pedaree satu siklus rilis sebelum mengubah topik atau skema.
-4. Sediakan migrasi balik untuk database `pawonee`.
-5. Catat setiap perubahan versi di `VERSIONS.md` dan TownHall Pawonee-TownHall v1.0.0.
+- Perubahan skema DB butuh migrasi baru dan migrasi balik; memengaruhi 6 repo divisi.
+- Perubahan audiens JWT memutus autentikasi semua klien dan backend.
+- Perubahan kontrak tanpa pemberitahuan merusak rekomendasi pendamping Pedaree; beri tahu satu siklus rilis sebelumnya.
 
 ## Batasan
 
-- Dokumen ini tidak mengubah kode atau konfigurasi; hanya memetakan risiko.
-- Tidak ada pengujian beban atau perubahan infrastruktur dalam dokumen ini.
-- Radius ditekankan pada konsistensi `:shared:pantry-resep`, bank 12 resep, `sinyal.pedaree.v1`, database `pawonee`, dan JWT audiens `pawonee`.
-- Keputusan darurat lintas divisi dirujuk ke TownHall Pawonee-TownHall v1.0.0.
+- Dokumen ini hanya memetakan batas dan risiko; tidak mengubah kode atau konfigurasi.
+- Keputusan lintas divisi dirujuk ke `KONTEKS-LINTAS-DIVISI.md` dan TownHall Pawonee v1.0.0.
