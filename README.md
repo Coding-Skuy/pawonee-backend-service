@@ -39,3 +39,12 @@ Atau via compose di `pawonee-infra-devops` (layanan `db` + `backend`).
 - [pawonee-app-kmp](https://github.com/Coding-Skuy/pawonee-app-kmp) (pemilik `:shared:pantry-resep`)
 - [pawonee-ai-models](https://github.com/Coding-Skuy/pawonee-ai-models) (bank resep grade-2 + skema)
 - [pawonee-data-pipeline](https://github.com/Coding-Skuy/pawonee-data-pipeline) (sinyal ke Pedaree)
+
+## Dokumentasi API
+
+Kontrak REST v1 ditulis sebagai OpenAPI 3.1 di [`docs/api/openapi.yaml`](docs/api/openapi.yaml) dan dirender dengan Scalar di [`docs/api/index.html`](docs/api/index.html).
+
+- Online (GitHub Pages): https://coding-skuy.github.io/pawonee-backend-service/api/
+- Lokal: `bun x serve docs/api` lalu buka alamat yang dicetak (mis. http://localhost:3000).
+- Validasi: `bun x @redocly/cli@latest lint docs/api/openapi.yaml`.
+- Kontrak hanya berubah lewat bump versi + ADR baru di `docs/decisions/`; sumbernya `FSD/30-kontrak.md` di Pawonee-TownHall v1.0.0.

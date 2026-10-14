@@ -1,0 +1,951 @@
+openapi: 3.1.0
+info:
+  title: API Pawonee — ChefGenie
+  version: 1.0.0
+  summary: Kontrak REST v1 backend Pawonee (rekomendasi resep grade-2 dari stok Pedaree).
+  description: |
+    Backend Rust Pawonee (AI Cooking Assistant) di atas DB logis `pawonee`.
+    Sumber kebenaran: Pawonee-TownHall `platform/versions/v1.0.0/FSD/30-kontrak.md`,
+    `FSD/20-model-data.md`, `BRD/10-resep-grade2.md`, `BRD/20-preferensi-keluarga.md`.
+
+    Aturan baku:
+    - Berat selalu **gram (integer)**, uang selalu **rupiah (integer, IDR)**, waktu selalu **menit (integer)**.
+    - Bank berisi **12 resep inti** (`R-01`..`R-12`); porsi **1–8 jiwa**.
+    - `kodeGrade` salah satu dari `G2-V`, `G2-U`, `G2-S`, `NON-G2`.
+    - Semua permintaan membawa header `X-Kontrak-Versi: v1`.
+    - Autentikasi: JWT akses 15 menit + refresh 7 hari (reuse-detection), audiens `pawonee`;
+      API key per perangkat (`X-Device-Key`); service key server-ke-server (`X-Service-Key`, rotasi 90 hari).
+    - Batas laju: 30 permintaan per menit per token; lewat batas → `429` dengan `retrySetelahDetik: 60`.
+    - Kontrak hanya berubah lewat bump versi + ADR baru di `docs/decisions/`.
+  contact:
+    name: Divisi Pawonee — ChefGenie
+    url: https://github.com/Coding-Skuy/Pawonee-TownHall
+servers:
+  - url: https://api.pawonee.chefgenie.id/v1
+    description: Produksi (placeholder resmi)
+  - url: http://localhost:8080
+    description: Pengembangan lokal
+tags:
+  - name: Kesehatan
+    description: Pemeriksaan layanan.
+  - name: Auth
+    description: Login dan refresh JWT audiens `pawonee`.
+  - name: Resep
+    description: Bank 12 resep grade-2 dan detail terskala per jiwa.
+  - name: Rekomendasi
+    description: Rekomendasi maksimal 5 resep dari stok dan profil.
+  - name: Stok
+    description: Stok rumah tangga (sumber Pedaree inventori, hanya baca).
+  - name: Profil
+    description: Profil keluarga (alergi, pantangan, budget, alat).
+  - name: Riwayat
+    description: Riwayat masak dan serapan G2 (Tandai dimasak).
+security:
+  - bearerAuth: []
+paths:
+  /kesehatan:
+    get:
+      tags: [Kesehatan]
+      operationId: kesehatan
+      summary: Cek kesehatan layanan
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/KontrakVersi'
+      responses:
+        '200':
+          description: Layanan sehat.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Kesehatan'
+              example:
+                status: baik
+                kontrakVersi: v1
+        '500':
+          $ref: '#/components/responses/KesalahanServer'
+  /auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Masuk dan terima token akses + refresh
+      description: Mengembalikan JWT akses (15 menit) dan refresh (7 hari) dengan audiens `pawonee`. Tanpa akun bersama.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/KontrakVersi'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Token diterbitkan.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/TokenPasangan'
+        '400':
+          $ref: '#/components/responses/Validasi'
+        '401':
+          $ref: '#/components/responses/TidakTerotentikasi'
+        '422':
+          $ref: '#/components/responses/TakTerproses'
+        '429':
+          $ref: '#/components/responses/BatasLaju'
+        '500':
+          $ref: '#/components/responses/KesalahanServer'
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      operationId: refreshToken
+      summary: Tukar refresh token dengan pasangan token baru
+      description: |
+        Refresh token sekali pakai. Bila token lama dipakai ulang (reuse-detection),
+        seluruh keluarga refresh pengguna dicabut dan pengguna wajib login ulang (`401`).
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/KontrakVersi'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken:
+                  type: string
+      responses:
+        '200':
+          description: Pasangan token baru.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/TokenPasangan'
+        '400':
+          $ref: '#/components/responses/Validasi'
+        '401':
+          $ref: '#/components/responses/TidakTerotentikasi'
+        '409':
+          $ref: '#/components/responses/Konflik'
+        '429':
+          $ref: '#/components/responses/BatasLaju'
+        '500':
+          $ref: '#/components/responses/KesalahanServer'
+  /resep:
+    get:
+      tags: [Resep]
+      operationId: daftarResep
+      summary: Daftar 12 resep bank
+      description: "Mengembalikan 12 resep inti. Klien menyimpan cache 7 hari (`Cache-Control: public, max-age=604800`)."
+      security:
+        - bearerAuth: []
+        - deviceKey: []
+      parameters:
+        - $ref: '#/components/parameters/KontrakVersi'
+      responses:
+        '200':
+          description: Bank resep.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: public, max-age=604800
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    minItems: 12
+                    maxItems: 12
+                    items:
+                      $ref: '#/components/schemas/Resep'
+        '401':
+          $ref: '#/components/responses/TidakTerotentikasi'
+        '429':
+          $ref: '#/components/responses/BatasLaju'
+        '500':
+          $ref: '#/components/responses/KesalahanServer'
+  /resep/{id}:
+    get:
+      tags: [Resep]
+      operationId: detailResep
+      summary: Detail resep dengan bahan terskala per jiwa
+      description: Bahan diskala memakai faktor porsi dan pembulatan BRD 10 (sayur kelipatan 50 g, telur butir genap, santan kelipatan 200 ml). Cache 86400 detik per `id`+`jiwa`.
+      security:
+        - bearerAuth: []
+        - deviceKey: []
+      parameters:
+        - $ref: '#/components/parameters/KontrakVersi'
+        - name: id
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/ResepId'
+        - name: jiwa
+          in: query
+          required: false
+          description: Jumlah jiwa 1–8 (bawaan 4). Di luar rentang → `422 JIWA_DI_LUAR_RENTANG`.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 8
+            default: 4
+      responses:
+        '200':
+          description: Detail resep terskala.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Rekomendasi'
+        '400':
+          $ref: '#/components/responses/Validasi'
+        '401':
+          $ref: '#/components/responses/TidakTerotentikasi'
+        '404':
+          $ref: '#/components/responses/ResepTidakAda'
+        '422':
+          $ref: '#/components/responses/JiwaDiLuarRentang'
+        '429':
+          $ref: '#/components/responses/BatasLaju'
+        '500':
+          $ref: '#/components/responses/KesalahanServer'
+  /rekomendasi:
+    post:
+      tags: [Rekomendasi]
+      operationId: rekomendasi
+      summary: Hitung maksimal 5 rekomendasi
+      description: |
+        Lima tahap: filter keras (alergi, pantangan mutlak, alat, waktu), skor serapan (bobot 50, bonus +5 untuk G2-S kedaluwarsa ≤2 hari),
+        skor kemudahan (bobot 50), ranking + diversifikasi (maksimal 2 sekelompok), penjelasan + belanja tambahan.
+        Bila stok kosong, kembalikan mode hemat 5 resep termurah dengan `modeTanpaStok: true`.
+        Dipakai klien mobile bila RAM di bawah 2 GB; selain itu rekomendasi dihitung on-device.
+      parameters:
+        - $ref: '#/components/parameters/KontrakVersi'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RekomendasiRequest'
+            example:
+              profil:
+                idKeluarga: KEL-0001
+                jumlahJiwa: 4
+                alergi: []
+                pantangan: [halal-selalu]
+                budgetPerMakan: 35000
+                levelPedas: 1
+                alatMasak: [kompor, wajan, panci, kukusan]
+              stok:
+                - namaBahan: kentang mini
+                  gram: 600
+                  kedaluwarsaHari: 5
+                  kodeGrade: G2-U
+                - namaBahan: wortel bengkok
+                  gram: 400
+                  kedaluwarsaHari: 4
+                  kodeGrade: G2-V
+              jiwa: 4
+              waktuMaksimalMenit: 30
+      responses:
+        '200':
+          description: Maksimal 5 rekomendasi terurut skor menurun.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    maxItems: 5
+                    items:
+                      $ref: '#/components/schemas/Rekomendasi'
+                  modeTanpaStok:
+                    type: boolean
+                    description: "`true` bila stok kosong dan hasil adalah 5 resep termurah."
+        '400':
+          $ref: '#/components/responses/Validasi'
+        '401':
+          $ref: '#/components/responses/TidakTerotentikasi'
+        '422':
+          $ref: '#/components/responses/JiwaDiLuarRentang'
+        '429':
+          $ref: '#/components/responses/BatasLaju'
+        '500':
+          $ref: '#/components/responses/KesalahanServer'
+  /stok:
+    get:
+      tags: [Stok]
+      operationId: bacaStok
+      summary: Baca stok keluarga dari Pedaree
+      description: Proksi baca ke Pedaree inventori (cache 60 detik). Bila Pedaree mati, jawaban memakai data tersimpan dengan header `X-Data-Usang true`. Pawonee tidak mengubah stok.
+      security:
+        - bearerAuth: []
+        - deviceKey: []
+        - serviceKey: []
+      parameters:
+        - $ref: '#/components/parameters/KontrakVersi'
+        - name: idKeluarga
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/IdKeluarga'
+      responses:
+        '200':
+          description: Stok keluarga.
+          headers:
+            X-Data-Usang:
+              description: "`true` bila Pedaree tidak terjangkau dan data berasal dari cache."
+              schema:
+                type: string
+                enum: ['true']
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/StokItem'
+        '400':
+          $ref: '#/components/responses/Validasi'
+        '401':
+          $ref: '#/components/responses/TidakTerotentikasi'
+        '404':
+          $ref: '#/components/responses/ProfilTidakAda'
+        '429':
+          $ref: '#/components/responses/BatasLaju'
+        '500':
+          $ref: '#/components/responses/KesalahanServer'
+  /profil/{idKeluarga}:
+    put:
+      tags: [Profil]
+      operationId: simpanProfil
+      summary: Simpan profil keluarga (idempoten)
+      description: |
+        Idempoten berdasarkan `versiProfil`: kirim ulang isi yang sama kembali `200` tanpa duplikat.
+        Versi lebih lama dari yang tersimpan → `409`. Perubahan profil membatalkan rekomendasi tersimpan dan memicu hitung ulang.
+      parameters:
+        - $ref: '#/components/parameters/KontrakVersi'
+        - name: idKeluarga
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/IdKeluarga'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfilKeluarga'
+      responses:
+        '200':
+          description: Profil tersimpan.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [tersimpan]
+                    properties:
+                      tersimpan:
+                        type: boolean
+                        const: true
+        '400':
+          $ref: '#/components/responses/Validasi'
+        '401':
+          $ref: '#/components/responses/TidakTerotentikasi'
+        '404':
+          $ref: '#/components/responses/ProfilTidakAda'
+        '409':
+          $ref: '#/components/responses/Konflik'
+        '422':
+          $ref: '#/components/responses/TakTerproses'
+        '429':
+          $ref: '#/components/responses/BatasLaju'
+        '500':
+          $ref: '#/components/responses/KesalahanServer'
+  /riwayat-masak:
+    post:
+      tags: [Riwayat]
+      operationId: tandaiDimasak
+      summary: Tandai dimasak (catat serapan G2)
+      description: |
+        Menulis `riwayat_masak`. Gram serapan dihitung server dari bahan terskala (`PorsiScaler`), bukan klaim pengguna.
+        Tanda ganda untuk resep dan hari yang sama dihitung sekali (kembali `200` dengan `duplikat: true`).
+        Memicu event `resep.dimasak` dan `serapan.dihitung` (FSD 30).
+      parameters:
+        - $ref: '#/components/parameters/KontrakVersi'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [idKeluarga, resepId, jiwa, tanggal]
+              properties:
+                idKeluarga:
+                  $ref: '#/components/schemas/IdKeluarga'
+                resepId:
+                  $ref: '#/components/schemas/ResepId'
+                jiwa:
+                  type: integer
+                  minimum: 1
+                  maximum: 8
+                tanggal:
+                  type: string
+                  format: date
+      responses:
+        '201':
+          description: Riwayat tercatat.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/RiwayatMasak'
+        '200':
+          description: Tanda ganda (resep + hari sama) diabaikan.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/RiwayatMasak'
+                  duplikat:
+                    type: boolean
+                    const: true
+        '400':
+          $ref: '#/components/responses/Validasi'
+        '401':
+          $ref: '#/components/responses/TidakTerotentikasi'
+        '404':
+          $ref: '#/components/responses/ResepTidakAda'
+        '422':
+          $ref: '#/components/responses/JiwaDiLuarRentang'
+        '429':
+          $ref: '#/components/responses/BatasLaju'
+        '500':
+          $ref: '#/components/responses/KesalahanServer'
+    get:
+      tags: [Riwayat]
+      operationId: bacaRiwayat
+      summary: Riwayat masak dan serapan mingguan
+      description: Retensi riwayat minimal 2 tahun. Target per keluarga per minggu — serapan ≥1.500 g, rasio ≥80%, waste ≤300 g (BRD 30).
+      parameters:
+        - $ref: '#/components/parameters/KontrakVersi'
+        - name: idKeluarga
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/IdKeluarga'
+        - name: mingguTerakhir
+          in: query
+          required: false
+          description: Jumlah minggu ke belakang (bawaan 8).
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 104
+            default: 8
+      responses:
+        '200':
+          description: Riwayat dan ringkasan.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [riwayat, serapanMingguan]
+                    properties:
+                      riwayat:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/RiwayatMasak'
+                      serapanMingguan:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/SerapanMingguan'
+        '400':
+          $ref: '#/components/responses/Validasi'
+        '401':
+          $ref: '#/components/responses/TidakTerotentikasi'
+        '404':
+          $ref: '#/components/responses/ProfilTidakAda'
+        '429':
+          $ref: '#/components/responses/BatasLaju'
+        '500':
+          $ref: '#/components/responses/KesalahanServer'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT akses 15 menit, audiens `pawonee`.
+    deviceKey:
+      type: apiKey
+      in: header
+      name: X-Device-Key
+      description: API key per perangkat terdaftar (hak minimal).
+    serviceKey:
+      type: apiKey
+      in: header
+      name: X-Service-Key
+      description: Service key server-ke-server, least-privilege, rotasi 90 hari.
+  parameters:
+    KontrakVersi:
+      name: X-Kontrak-Versi
+      in: header
+      required: false
+      description: Versi kontrak yang dipakai klien.
+      schema:
+        type: string
+        enum: [v1]
+        default: v1
+  schemas:
+    Kesehatan:
+      type: object
+      required: [status, kontrakVersi]
+      properties:
+        status:
+          type: string
+          enum: [baik]
+        kontrakVersi:
+          type: string
+          enum: [v1]
+    KodeGrade:
+      type: string
+      description: "Kode grade-2: `G2-V` cacat visual, `G2-U` ukuran tidak standar, `G2-S` surplus cepat layu, `NON-G2` bukan grade-2."
+      enum: [G2-V, G2-U, G2-S, NON-G2]
+    ResepId:
+      type: string
+      description: Id resep bank 12 resep.
+      pattern: '^R-(0[1-9]|1[0-2])$'
+      examples: [R-06]
+    IdKeluarga:
+      type: string
+      pattern: '^KEL-[0-9]{4}$'
+      examples: [KEL-0001]
+    KelompokResep:
+      type: string
+      enum: [kuah, tumis, sambal, lauk, kukus]
+    Alergi:
+      type: string
+      enum: [udang, telur, kacang-tanah, kedelai, susu-sapi, ikan, gluten]
+    Pantangan:
+      type: string
+      enum: [halal-selalu, vegetarian-nabati, tanpa-santan, rendah-garam, rendah-gula, lunak-lansia]
+    AlatMasak:
+      type: string
+      enum: [kompor, wajan, panci, kukusan, blender, oven, air-fryer]
+    SumberBelanja:
+      type: string
+      enum: [pedaree-stok, lumbung-g2, campuran]
+    BahanResep:
+      type: object
+      required: [namaBahan, gramDasar4Porsi, kodeGrade, opsional]
+      properties:
+        namaBahan:
+          type: string
+        gramDasar4Porsi:
+          type: integer
+          minimum: 0
+          description: Takaran dasar 4 porsi dalam gram.
+        kodeGrade:
+          $ref: '#/components/schemas/KodeGrade'
+        opsional:
+          type: boolean
+    Resep:
+      type: object
+      required: [id, nama, kelompok, waktuMenit, kisaranBiayaRp, bahan, langkah, alergen, alatWajib]
+      properties:
+        id:
+          $ref: '#/components/schemas/ResepId'
+        nama:
+          type: string
+        kelompok:
+          $ref: '#/components/schemas/KelompokResep'
+        waktuMenit:
+          type: integer
+          minimum: 1
+          maximum: 45
+          description: Maksimal 45 menit, kompor tunggal.
+        kisaranBiayaRp:
+          type: array
+          description: "[minimum, maksimum] rupiah per porsi keluarga 4 jiwa (Rp18.000–Rp45.000)."
+          minItems: 2
+          maxItems: 2
+          items:
+            type: integer
+            minimum: 18000
+            maximum: 45000
+        bahan:
+          type: array
+          items:
+            $ref: '#/components/schemas/BahanResep'
+        langkah:
+          type: array
+          items:
+            type: string
+        alergen:
+          type: array
+          items:
+            $ref: '#/components/schemas/Alergi'
+        alatWajib:
+          type: array
+          items:
+            $ref: '#/components/schemas/AlatMasak'
+    StokItem:
+      type: object
+      description: Alias tipe stok Pedaree; Pawonee tidak mendefinisikan ulang.
+      required: [namaBahan, gram, kedaluwarsaHari, kodeGrade]
+      properties:
+        namaBahan:
+          type: string
+        gram:
+          type: integer
+          minimum: 0
+        kedaluwarsaHari:
+          type: integer
+          description: Sisa hari sebelum kedaluwarsa. G2-S dengan nilai ≤2 mendapat bonus skor +5.
+        kodeGrade:
+          $ref: '#/components/schemas/KodeGrade'
+    ProfilKeluarga:
+      type: object
+      required: [idKeluarga, jumlahJiwa, alergi, pantangan, budgetPerMakan, levelPedas, alatMasak]
+      properties:
+        idKeluarga:
+          $ref: '#/components/schemas/IdKeluarga'
+        versiProfil:
+          type: integer
+          minimum: 1
+          description: Versi profil untuk idempotensi `PUT`.
+        jumlahJiwa:
+          type: integer
+          minimum: 1
+          maximum: 8
+        komposisi:
+          type: object
+          description: Komposisi jiwa; balita dihitung 0,6 jiwa untuk sayur.
+          properties:
+            dewasa:
+              type: integer
+              minimum: 0
+            anak:
+              type: integer
+              minimum: 0
+            balita:
+              type: integer
+              minimum: 0
+            lansia:
+              type: integer
+              minimum: 0
+        alergi:
+          type: array
+          items:
+            $ref: '#/components/schemas/Alergi'
+        pantangan:
+          type: array
+          items:
+            $ref: '#/components/schemas/Pantangan'
+        budgetPerMakan:
+          type: integer
+          minimum: 0
+          description: Rupiah (IDR, integer). Bawaan keluarga baru 35000.
+        levelPedas:
+          type: integer
+          minimum: 0
+          maximum: 3
+        alatMasak:
+          type: array
+          items:
+            $ref: '#/components/schemas/AlatMasak'
+        sumberBelanja:
+          $ref: '#/components/schemas/SumberBelanja'
+    BahanTerskala:
+      type: object
+      required: [namaBahan, gram]
+      properties:
+        namaBahan:
+          type: string
+        gram:
+          type: integer
+          minimum: 0
+    BelanjaItem:
+      type: object
+      required: [namaBahan, gram, perkiraanRp]
+      properties:
+        namaBahan:
+          type: string
+        gram:
+          type: integer
+          minimum: 0
+        perkiraanRp:
+          type: integer
+          minimum: 0
+          description: Rupiah (IDR, integer), harga server berbasis harga Lumbung G2 per 100 g.
+    Rekomendasi:
+      type: object
+      required: [resep, skorTotal, alasan, bahanTerskala, belanjaTambahan]
+      properties:
+        resep:
+          $ref: '#/components/schemas/Resep'
+        skorTotal:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 100
+        alasan:
+          type: string
+          description: Dua kalimat — bahan apa terserap dan mengapa mudah.
+        bahanTerskala:
+          type: array
+          items:
+            $ref: '#/components/schemas/BahanTerskala'
+        belanjaTambahan:
+          type: array
+          description: Total tidak boleh melebihi `budgetPerMakan` profil.
+          items:
+            $ref: '#/components/schemas/BelanjaItem'
+    RekomendasiRequest:
+      type: object
+      required: [profil, stok, jiwa, waktuMaksimalMenit]
+      properties:
+        profil:
+          $ref: '#/components/schemas/ProfilKeluarga'
+        stok:
+          type: array
+          items:
+            $ref: '#/components/schemas/StokItem'
+        jiwa:
+          type: integer
+          minimum: 1
+          maximum: 8
+        waktuMaksimalMenit:
+          type: integer
+          minimum: 10
+          maximum: 45
+          default: 30
+    RiwayatMasak:
+      type: object
+      required: [resepId, jiwa, gramG2Terserap, tanggal]
+      properties:
+        resepId:
+          $ref: '#/components/schemas/ResepId'
+        jiwa:
+          type: integer
+          minimum: 1
+          maximum: 8
+        gramG2Terserap:
+          type: integer
+          minimum: 0
+          description: Gram G2 dari takaran terskala (bukan klaim pengguna).
+        tanggal:
+          type: string
+          format: date
+    SerapanMingguan:
+      type: object
+      required: [mingguMulai, serapanGram, rasioSerapan, wasteGram, nilaiHemat]
+      properties:
+        mingguMulai:
+          type: string
+          format: date
+          description: Senin 00.00 WIB; periode Senin–Minggu 23.59 WIB.
+        serapanGram:
+          type: integer
+          minimum: 0
+          description: Target ≥1.500 g per keluarga per minggu.
+        rasioSerapan:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: dimasak / (dimasak + busuk); target ≥0,80.
+        wasteGram:
+          type: integer
+          minimum: 0
+          description: Target ≤300 g per minggu (laporan busuk Pedaree).
+        nilaiHemat:
+          type: integer
+          minimum: 0
+          description: Rupiah (IDR, integer) = gram terserap × harga pasar per gram × 0,6.
+    LoginRequest:
+      type: object
+      required: [idPengguna, kataSandi]
+      properties:
+        idPengguna:
+          type: string
+        kataSandi:
+          type: string
+          format: password
+          writeOnly: true
+        idPerangkat:
+          type: string
+          description: Id perangkat terdaftar (opsional, untuk pencatatan).
+    TokenPasangan:
+      type: object
+      required: [tokenAkses, tokenRefresh, kedaluwarsaDetik, audiens]
+      properties:
+        tokenAkses:
+          type: string
+          description: JWT akses, umur 15 menit.
+        tokenRefresh:
+          type: string
+          description: Refresh token, umur 7 hari, sekali pakai.
+        kedaluwarsaDetik:
+          type: integer
+          const: 900
+        audiens:
+          type: string
+          const: pawonee
+    KodeGalat:
+      type: string
+      enum:
+        - STOK_KOSONG
+        - PROFIL_TIDAK_ADA
+        - JARINGAN_GAGAL
+        - RESEP_TIDAK_ADA
+        - JIWA_DI_LUAR_RENTANG
+        - VALIDASI_GAGAL
+        - BATAS_LAJU
+        - TIDAK_TEROTENTIKASI
+        - KONFLIK
+        - TAK_TERPROSES
+        - KESALAHAN_SERVER
+    AppError:
+      type: object
+      description: Respons galat baku (`AppError`).
+      required: [kode, pesan]
+      properties:
+        kode:
+          $ref: '#/components/schemas/KodeGalat'
+        pesan:
+          type: string
+        rinci:
+          type: array
+          items:
+            type: object
+            properties:
+              bidang:
+                type: string
+              pesan:
+                type: string
+        retrySetelahDetik:
+          type: integer
+          description: Hanya pada `429`; nilai 60.
+  responses:
+    Validasi:
+      description: 400 — validasi gagal (`jiwa` 1–8, `waktuMaksimalMenit` 10–45, `gram` ≥0, `kodeGrade` enum).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AppError'
+          example:
+            kode: VALIDASI_GAGAL
+            pesan: Parameter tidak valid.
+            rinci:
+              - bidang: waktuMaksimalMenit
+                pesan: harus 10 sampai 45
+    TidakTerotentikasi:
+      description: 401 — token hilang, kedaluwarsa, audiens bukan `pawonee`, atau refresh dipakai ulang.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AppError'
+          example:
+            kode: TIDAK_TEROTENTIKASI
+            pesan: Token tidak valid.
+    ResepTidakAda:
+      description: 404 — resep tidak ada.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AppError'
+          example:
+            kode: RESEP_TIDAK_ADA
+            pesan: Resep R-99 tidak ada.
+    ProfilTidakAda:
+      description: 404 — profil keluarga tidak ada.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AppError'
+          example:
+            kode: PROFIL_TIDAK_ADA
+            pesan: Profil KEL-0001 tidak ada.
+    Konflik:
+      description: 409 — konflik versi profil atau pakai-ulang refresh token.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AppError'
+          example:
+            kode: KONFLIK
+            pesan: Versi profil lebih lama dari yang tersimpan.
+    TakTerproses:
+      description: 422 — entitas tidak dapat diproses (aturan bisnis dilanggar).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AppError'
+          example:
+            kode: TAK_TERPROSES
+            pesan: Aturan bisnis dilanggar.
+    JiwaDiLuarRentang:
+      description: 422 — `jiwa` di luar rentang 1–8.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AppError'
+          example:
+            kode: JIWA_DI_LUAR_RENTANG
+            pesan: Jumlah jiwa harus 1 sampai 8.
+    BatasLaju:
+      description: 429 — melewati 30 permintaan per menit per token.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AppError'
+          example:
+            kode: BATAS_LAJU
+            pesan: Terlalu banyak permintaan.
+            retrySetelahDetik: 60
+    KesalahanServer:
+      description: 500 — kesalahan server.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AppError'
+          example:
+            kode: KESALAHAN_SERVER
+            pesan: Terjadi kesalahan pada server.
