@@ -2,3 +2,5 @@
 Cargo.lock
 .env
 .DS_Store
+graphify-out/
+.tools/
