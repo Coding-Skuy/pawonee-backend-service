@@ -23,7 +23,7 @@ info:
 servers:
   - url: https://api.pawonee.chefgenie.id/v1
     description: Produksi (placeholder resmi)
-  - url: http://localhost:8080
+  - url: http://localhost:8080/v1
     description: Pengembangan lokal
 tags:
   - name: Kesehatan
@@ -61,6 +61,8 @@ paths:
               example:
                 status: baik
                 kontrakVersi: v1
+        '400':
+          $ref: '#/components/responses/Validasi'
         '500':
           $ref: '#/components/responses/KesalahanServer'
   /auth/login:
@@ -120,6 +122,8 @@ paths:
               properties:
                 refreshToken:
                   type: string
+                  minLength: 1
+                  maxLength: 256
       responses:
         '200':
           description: Pasangan token baru.
@@ -172,6 +176,8 @@ paths:
                     maxItems: 12
                     items:
                       $ref: '#/components/schemas/Resep'
+        '400':
+          $ref: '#/components/responses/Validasi'
         '401':
           $ref: '#/components/responses/TidakTerotentikasi'
         '429':
@@ -296,7 +302,7 @@ paths:
       tags: [Stok]
       operationId: bacaStok
       summary: Baca stok keluarga dari Pedaree
-      description: Proksi baca ke Pedaree inventori (cache 60 detik). Bila Pedaree mati, jawaban memakai data tersimpan dengan header `X-Data-Usang true`. Pawonee tidak mengubah stok.
+      description: "Proksi baca ke Pedaree inventori (cache 60 detik). Bila Pedaree mati, jawaban memakai data tersimpan dengan header `X-Data-Usang: true`; tanpa data tersimpan → `502 JARINGAN_GAGAL`. Pengguna/perangkat hanya boleh membaca keluarganya sendiri; service key memerlukan cakupan `stok:baca`. Pawonee tidak mengubah stok."
       security:
         - bearerAuth: []
         - deviceKey: []
@@ -337,6 +343,8 @@ paths:
           $ref: '#/components/responses/BatasLaju'
         '500':
           $ref: '#/components/responses/KesalahanServer'
+        '502':
+          $ref: '#/components/responses/JaringanGagal'
   /profil/{idKeluarga}:
     put:
       tags: [Profil]
@@ -344,7 +352,9 @@ paths:
       summary: Simpan profil keluarga (idempoten)
       description: |
         Idempoten berdasarkan `versiProfil`: kirim ulang isi yang sama kembali `200` tanpa duplikat.
-        Versi lebih lama dari yang tersimpan → `409`. Perubahan profil membatalkan rekomendasi tersimpan dan memicu hitung ulang.
+        Versi lebih lama dari yang tersimpan → `409`; versi sama dengan isi berbeda → `409`. `versiProfil` dihilangkan: isi sama → `200` tanpa perubahan, isi beda → versi naik satu.
+        `jumlahJiwa` di luar 1–8 → `422 JIWA_DI_LUAR_RENTANG`. Penyimpanan pertama mengikat akun pemanggil ke `idKeluarga` (1 akun 1 keluarga, FR-301);
+        keluarga lain → `401`. Perubahan profil membatalkan rekomendasi tersimpan dan memicu hitung ulang (event `profil.disimpan`).
       parameters:
         - $ref: '#/components/parameters/KontrakVersi'
         - name: idKeluarga
@@ -395,7 +405,7 @@ paths:
       summary: Tandai dimasak (catat serapan G2)
       description: |
         Menulis `riwayat_masak`. Gram serapan dihitung server dari bahan terskala (`PorsiScaler`), bukan klaim pengguna.
-        Tanda ganda untuk resep dan hari yang sama dihitung sekali (kembali `200` dengan `duplikat: true`).
+        Tanda ganda untuk resep dan hari yang sama dihitung sekali (kembali `200` dengan `duplikat: true`). Keluarga harus sudah punya profil (`404 PROFIL_TIDAK_ADA`); `resepId` tidak sesuai pola `R-01`..`R-12` → `400`.
         Memicu event `resep.dimasak` dan `serapan.dihitung` (FSD 30).
       parameters:
         - $ref: '#/components/parameters/KontrakVersi'
@@ -633,11 +643,17 @@ components:
       properties:
         namaBahan:
           type: string
+          minLength: 1
+          pattern: '\S'
+          description: Wajib diisi, bukan hanya spasi.
         gram:
           type: integer
           minimum: 0
+          maximum: 9007199254740991
         kedaluwarsaHari:
           type: integer
+          minimum: -9007199254740991
+          maximum: 9007199254740991
           description: Sisa hari sebelum kedaluwarsa. G2-S dengan nilai ≤2 mendapat bonus skor +5.
         kodeGrade:
           $ref: '#/components/schemas/KodeGrade'
@@ -648,29 +664,34 @@ components:
         idKeluarga:
           $ref: '#/components/schemas/IdKeluarga'
         versiProfil:
-          type: integer
+          type: [integer, 'null']
           minimum: 1
-          description: Versi profil untuk idempotensi `PUT`.
+          maximum: 2147483647
+          description: Versi profil untuk idempotensi `PUT`. `null` diperlakukan sama dengan dihilangkan.
         jumlahJiwa:
           type: integer
           minimum: 1
           maximum: 8
         komposisi:
-          type: object
+          type: [object, 'null']
           description: Komposisi jiwa; balita dihitung 0,6 jiwa untuk sayur.
           properties:
             dewasa:
               type: integer
               minimum: 0
+              maximum: 9007199254740991
             anak:
               type: integer
               minimum: 0
+              maximum: 9007199254740991
             balita:
               type: integer
               minimum: 0
+              maximum: 9007199254740991
             lansia:
               type: integer
               minimum: 0
+              maximum: 9007199254740991
         alergi:
           type: array
           items:
@@ -682,6 +703,7 @@ components:
         budgetPerMakan:
           type: integer
           minimum: 0
+          maximum: 9007199254740991
           description: Rupiah (IDR, integer). Bawaan keluarga baru 35000.
         levelPedas:
           type: integer
@@ -692,7 +714,10 @@ components:
           items:
             $ref: '#/components/schemas/AlatMasak'
         sumberBelanja:
-          $ref: '#/components/schemas/SumberBelanja'
+          description: Opsional; `null` atau dihilangkan berarti `campuran`.
+          anyOf:
+            - $ref: '#/components/schemas/SumberBelanja'
+            - type: 'null'
     BahanTerskala:
       type: object
       required: [namaBahan, gram]
@@ -740,7 +765,7 @@ components:
             $ref: '#/components/schemas/BelanjaItem'
     RekomendasiRequest:
       type: object
-      required: [profil, stok, jiwa, waktuMaksimalMenit]
+      required: [profil, stok, jiwa]
       properties:
         profil:
           $ref: '#/components/schemas/ProfilKeluarga'
@@ -757,6 +782,7 @@ components:
           minimum: 10
           maximum: 45
           default: 30
+          description: Opsional; bawaan 30 menit.
     RiwayatMasak:
       type: object
       required: [resepId, jiwa, gramG2Terserap, tanggal]
@@ -805,12 +831,20 @@ components:
       properties:
         idPengguna:
           type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[^\u0000]*\S[^\u0000]*$'
+          description: Wajib diisi, bukan hanya spasi, tanpa karakter NUL, maksimal 128 karakter (selainnya `400 VALIDASI_GAGAL`).
         kataSandi:
           type: string
           format: password
           writeOnly: true
+          minLength: 1
+          maxLength: 256
         idPerangkat:
           type: string
+          maxLength: 128
+          pattern: '^[^\u0000]*$'
           description: Id perangkat terdaftar (opsional, untuk pencatatan).
     TokenPasangan:
       type: object
@@ -940,6 +974,15 @@ components:
             kode: BATAS_LAJU
             pesan: Terlalu banyak permintaan.
             retrySetelahDetik: 60
+    JaringanGagal:
+      description: 502 — Pedaree tidak terjangkau dan tidak ada data stok tersimpan.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AppError'
+          example:
+            kode: JARINGAN_GAGAL
+            pesan: Pedaree tidak terjangkau.
     KesalahanServer:
       description: 500 — kesalahan server.
       content:
